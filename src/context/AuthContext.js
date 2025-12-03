@@ -3,7 +3,6 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { collection, query, where, getDocs, doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { findUserByPhone } from '../services/usersService';
-import { registerForPushNotifications, removeExpoPushToken } from '../helpers/pushNotifications';
 
 const AuthContext = createContext(null);
 
@@ -24,7 +23,8 @@ export const AuthProvider = ({ children }) => {
         throw new Error('USER_NOT_FOUND');
       }
 
-      if (existing.role !== 'driver') {
+      const normalizedRole = (existing.role || '').trim().toLowerCase();
+      if (normalizedRole !== 'driver') {
         throw new Error('NOT_DRIVER');
       }
 
@@ -40,14 +40,51 @@ export const AuthProvider = ({ children }) => {
       }
 
       setUser(existing);
-      setRole(existing.role || 'driver');
-
-      const uid = existing.id || existing.uid;
-      await registerForPushNotifications(uid);
+      setRole(normalizedRole || 'driver');
 
       return existing;
     } catch (error) {
       console.log('loginDriverByPhone error', error);
+      throw error;
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const loginOwnerByPhone = async (rawPhone) => {
+    setAuthLoading(true);
+    try {
+      if (!rawPhone) {
+        throw new Error('PHONE_REQUIRED');
+      }
+
+      const existing = await findUserByPhone(rawPhone);
+      if (!existing) {
+        throw new Error('USER_NOT_FOUND');
+      }
+
+      const normalizedRole = (existing.role || '').trim().toLowerCase();
+      if (normalizedRole !== 'owner') {
+        throw new Error('NOT_OWNER');
+      }
+
+      if (existing.isBlocked === true) {
+        throw new Error('USER_BLOCKED');
+      }
+
+      const kycStatus = existing.kyc?.overallStatus || existing.kycStatus || existing.verificationStatus;
+      const normalizedStatus = (kycStatus || '').toLowerCase();
+      const isVerified = ['approved', 'verified'].includes(normalizedStatus);
+      if (!isVerified) {
+        throw new Error('KYC_NOT_APPROVED');
+      }
+
+      setUser(existing);
+      setRole(normalizedRole || 'owner');
+
+      return existing;
+    } catch (error) {
+      console.log('loginOwnerByPhone error', error);
       throw error;
     } finally {
       setAuthLoading(false);
@@ -65,17 +102,8 @@ export const AuthProvider = ({ children }) => {
   };
 
   const logout = async () => {
-    try {
-      if (user?.id || user?.uid) {
-        const uid = user.id || user.uid;
-        await removeExpoPushToken(uid);
-      }
-    } catch (error) {
-      console.warn('logout removeFcmToken error', error);
-    } finally {
-      setUser(null);
-      setRole(null);
-    }
+    setUser(null);
+    setRole(null);
   };
 
   useEffect(() => {
@@ -106,7 +134,9 @@ export const AuthProvider = ({ children }) => {
   }, [user?.id]);
 
   return (
-    <AuthContext.Provider value={{ user, role, authLoading, loginDriverByPhone, refreshUser, logout }}>
+    <AuthContext.Provider
+      value={{ user, role, authLoading, loginDriverByPhone, loginOwnerByPhone, refreshUser, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );

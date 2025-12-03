@@ -8,14 +8,25 @@ import {
   TextInput,
   ScrollView,
   Modal,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import firebase from 'firebase/compat/app';
+import 'firebase/compat/firestore';
+import 'firebase/compat/auth';
+import { useAuth } from '../src/context/AuthContext';
 
 const CITY_OPTIONS = ['Ahmedabad', 'Surat', 'Vadodara', 'Rajkot'];
+const OTP_RATE_LIMIT_MS = 60 * 1000; // 1 minute between requests
+const RESEND_SECONDS = 30;
+const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 const OwnerRegistrationScreen = ({ navigation }) => {
   const insets = useSafeAreaInsets();
+
+  const { loginOwnerByPhone } = useAuth() || {};
 
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
@@ -30,18 +41,55 @@ const OwnerRegistrationScreen = ({ navigation }) => {
   const [otpSent, setOtpSent] = useState(false);
   const [resendTimer, setResendTimer] = useState(0);
   const [otpDigits, setOtpDigits] = useState(Array(6).fill(''));
+  const [otpError, setOtpError] = useState('');
+  const [otpSending, setOtpSending] = useState(false);
+  const [lastOtpSentAt, setLastOtpSentAt] = useState(null);
 
   const [uploadModal, setUploadModal] = useState({ visible: false, target: null });
   const [cityModalVisible, setCityModalVisible] = useState(false);
   const [successModal, setSuccessModal] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [ownerId, setOwnerId] = useState(null);
+  const [formError, setFormError] = useState('');
+  const [isVerifying, setIsVerifying] = useState(false);
 
   const otpInputRefs = useRef([]);
 
   const isPhoneValid = useMemo(() => /^\d{10}$/.test(phoneNumber), [phoneNumber]);
   const maskedNumber = useMemo(() => {
     if (phoneNumber.length < 4) return phoneNumber;
-    return `+91 XXXXX${phoneNumber.slice(-4)}`;
+    return '+91 XXXXX' + phoneNumber.slice(-4);
   }, [phoneNumber]);
+
+  useEffect(() => {
+    try {
+      console.log('--- FIREBASE DEBUG START ---');
+      console.log('firebase.apps.length =', firebase.apps.length);
+      if (firebase.apps.length) {
+        const app = firebase.app();
+        console.log('app.name =', app.name);
+        console.log('app.options =', app.options);
+        console.log('projectId =', app.options?.projectId || '(no projectId)');
+      } else {
+        console.warn('No firebase apps initialized!');
+      }
+
+      if (firebase.firestore) {
+        try {
+          if (firebase.firestore.setLogLevel) firebase.firestore.setLogLevel('debug');
+          const db = firebase.firestore();
+          console.log('firestore instance ok:', !!db);
+        } catch (inner) {
+          console.error('firestore inspector error', inner);
+        }
+      } else {
+        console.warn('firebase.firestore is undefined');
+      }
+      console.log('--- FIREBASE DEBUG END ---');
+    } catch (e) {
+      console.error('Firebase debug outer error', e);
+    }
+  }, []);
 
   useEffect(() => {
     if (!otpSent || resendTimer <= 0) return;
@@ -57,24 +105,81 @@ const OwnerRegistrationScreen = ({ navigation }) => {
     return () => clearInterval(interval);
   }, [otpSent, resendTimer]);
 
-  const handleSendOtp = () => {
-    if (!isPhoneValid) return;
-    setOtpSent(true);
-    setResendTimer(30);
-    setOtpDigits(Array(6).fill(''));
-    otpInputRefs.current[0]?.focus();
+  const sendMockOtp = async (targetPhoneNumber, targetOwnerId) => {
+    if (!targetPhoneNumber) {
+      throw new Error('PHONE_REQUIRED');
+    }
+
+    try {
+      const db = firebase.firestore();
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const payload = {
+        phoneNumber: targetPhoneNumber,
+        code,
+        ownerId: targetOwnerId || null,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        expiresAt: Date.now() + OTP_TTL_MS,
+      };
+
+      await db.collection('ownerOtps').add(payload);
+
+      if (__DEV__) {
+        console.log('Mock OTP generated for', targetPhoneNumber, code);
+      }
+
+      return code;
+    } catch (error) {
+      console.error('sendMockOtp error', error);
+      throw error;
+    }
+  };
+
+  const handleSendOtp = async () => {
+    if (!isPhoneValid || otpSending || isVerifying) return;
+
+    const now = Date.now();
+    if (lastOtpSentAt && now - lastOtpSentAt < OTP_RATE_LIMIT_MS) {
+      const waitSeconds = Math.ceil((OTP_RATE_LIMIT_MS - (now - lastOtpSentAt)) / 1000);
+      setOtpError(`Please wait ${waitSeconds}s before requesting another OTP.`);
+      return;
+    }
+
+    try {
+      setOtpSending(true);
+      setOtpError('');
+      setOtpSent(true);
+      setResendTimer(RESEND_SECONDS);
+      setOtpDigits(Array(6).fill(''));
+      otpInputRefs.current = [];
+      setTimeout(() => otpInputRefs.current[0]?.focus(), 100);
+
+      const normalizedPhone = phoneNumber.trim();
+      await sendMockOtp(normalizedPhone, ownerId);
+      setLastOtpSentAt(now);
+    } catch (error) {
+      console.error('handleSendOtp error', error);
+      setOtpError(error?.message || 'Failed to send OTP. Please try again.');
+      setOtpSent(false);
+    } finally {
+      setOtpSending(false);
+    }
   };
 
   const handleOtpChange = (value, index) => {
+    if (isVerifying) return;
     const digit = value.replace(/[^0-9]/g, '').slice(-1);
     setOtpDigits((prev) => {
       const copy = [...prev];
       copy[index] = digit;
+      const isComplete = copy.every((d) => d !== '');
+      if (isComplete) {
+        const code = copy.join('');
+        verifyOtp(code);
+      } else if (digit && index < otpDigits.length - 1) {
+        otpInputRefs.current[index + 1]?.focus();
+      }
       return copy;
     });
-    if (digit && index < otpDigits.length - 1) {
-      otpInputRefs.current[index + 1]?.focus();
-    }
   };
 
   const handleOtpKeyPress = (event, index) => {
@@ -86,6 +191,93 @@ const OwnerRegistrationScreen = ({ navigation }) => {
   const handleResend = () => {
     if (resendTimer > 0) return;
     handleSendOtp();
+  };
+
+  const verifyOtp = async (code) => {
+    try {
+      setIsVerifying(true);
+      setOtpError('');
+      setLoading(true);
+      const db = firebase.firestore();
+      const snapshot = await db
+        .collection('ownerOtps')
+        .where('phoneNumber', '==', phoneNumber)
+        .orderBy('createdAt', 'desc')
+        .limit(1)
+        .get();
+
+      if (snapshot.empty) {
+        Alert.alert('OTP', 'No OTP found. Please request a new OTP.');
+        return false;
+      }
+
+      const otpDoc = snapshot.docs[0];
+      const otpData = otpDoc.data();
+
+      if (otpData.expiresAt && Date.now() > otpData.expiresAt) {
+        Alert.alert('OTP', 'OTP expired. Please resend.');
+        return false;
+      }
+
+      if (otpData.code !== code) {
+        Alert.alert('OTP', 'Incorrect OTP. Please try again.');
+        return false;
+      }
+
+      const dbOwnerId = otpData.ownerId || ownerId || null;
+      if (dbOwnerId) {
+        await db.collection('users').doc(dbOwnerId).update({
+          verified: true,
+          'kyc.overallStatus': 'Verified',
+          'kyc.verifiedAt': firebase.firestore.FieldValue.serverTimestamp(),
+        });
+      } else {
+        const userSnap = await db
+          .collection('users')
+          .where('phoneNumber', '==', phoneNumber)
+          .limit(1)
+          .get();
+        if (userSnap.empty) {
+          Alert.alert('OTP', 'No user account found. Please register first.');
+          return false;
+        }
+        const uid = userSnap.docs[0].id;
+        await db.collection('users').doc(uid).update({
+          verified: true,
+          'kyc.overallStatus': 'Verified',
+          'kyc.verifiedAt': firebase.firestore.FieldValue.serverTimestamp(),
+        });
+        setOwnerId(uid);
+      }
+
+      try {
+        await db.collection('ownerOtps').doc(otpDoc.id).delete();
+      } catch (otpDeleteErr) {
+        console.warn('verifyOtp: failed to delete ownerOtps doc', otpDeleteErr);
+      }
+
+      if (loginOwnerByPhone) {
+        try {
+          await loginOwnerByPhone(phoneNumber.trim());
+        } catch (loginError) {
+          console.warn('Owner auto login failed', loginError);
+        }
+      }
+
+      Alert.alert('Verified', 'Phone verified — account is active.');
+      setOtpSent(false);
+      setOtpDigits(Array(6).fill(''));
+      setSuccessModal(false);
+      navigation.replace('OwnerTabs');
+      return true;
+    } catch (error) {
+      console.error('verifyOtp error', error);
+      Alert.alert('Error', 'OTP verification failed. ' + (error.message || ''));
+      return false;
+    } finally {
+      setLoading(false);
+      setIsVerifying(false);
+    }
   };
 
   const openUploadModal = (target) => {
@@ -127,8 +319,74 @@ const OwnerRegistrationScreen = ({ navigation }) => {
     </View>
   );
 
-  const handleSubmit = () => {
-    setSuccessModal(true);
+  const handleSubmit = async () => {
+    if (loading || isVerifying) return;
+    if (!fullName.trim()) return Alert.alert('Validation', 'Enter full name');
+    if (!/^\d{10}$/.test(phoneNumber)) return Alert.alert('Validation', 'Enter 10-digit phone');
+
+    try {
+      setLoading(true);
+      setFormError('');
+      console.log('handleSubmit: creating owner user doc...');
+
+      const db = firebase.firestore();
+      console.log('handleSubmit: got db:', !!db);
+
+      const normalizedPhone = phoneNumber.trim();
+
+      const existingSnap = await db
+        .collection('users')
+        .where('phoneNumber', '==', normalizedPhone)
+        .limit(1)
+        .get();
+
+      if (!existingSnap.empty) {
+        const existingDoc = existingSnap.docs[0];
+        setOwnerId(existingDoc.id);
+        setFormError('This mobile number is already registered. Please use OTP login.');
+        return;
+      }
+
+      const userData = {
+        fullName: fullName.trim(),
+        email: email.trim() || null,
+        city,
+        businessType,
+        phoneNumber: normalizedPhone,
+        phone: normalizedPhone,
+        role: 'owner',
+        isBlocked: false,
+        verified: false,
+        kyc: {
+          aadhaarStatus: 'pending',
+          licenceStatus: 'pending',
+          photoStatus: 'pending',
+          overallStatus: 'pending',
+        },
+        docs: {
+          idProofFile: idProofFile || null,
+          addressProofFile: addressProofFile || null,
+          bankProofFile: bankProofFile || null,
+        },
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      };
+
+      console.log('handleSubmit: userData ->', userData);
+
+      const docRef = await db.collection('users').add(userData);
+      console.log('handleSubmit: users add() resolved, id =', docRef.id);
+
+      setOwnerId(docRef.id);
+      await sendMockOtp(normalizedPhone, docRef.id);
+      setSuccessModal(true);
+      setLastOtpSentAt(Date.now());
+    } catch (err) {
+      console.error('handleSubmit ERROR:', err, 'code:', err.code, 'message:', err.message);
+      Alert.alert('Firestore Error', `${err.code || ''} ${err.message || JSON.stringify(err)}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const businessOption = (option) => (
@@ -142,7 +400,7 @@ const OwnerRegistrationScreen = ({ navigation }) => {
       >
         {option}
       </Text>
-    </TouchableOpacity>
+    </TouchableOpacity> 
   );
 
   return (
@@ -216,12 +474,20 @@ const OwnerRegistrationScreen = ({ navigation }) => {
             </View>
 
             <TouchableOpacity
-              style={[styles.primaryButton, !isPhoneValid && styles.primaryButtonDisabled]}
-              disabled={!isPhoneValid}
+              style={[
+                styles.primaryButton,
+                (!isPhoneValid || otpSending || isVerifying) && styles.primaryButtonDisabled,
+              ]}
+              disabled={!isPhoneValid || otpSending || isVerifying}
               onPress={handleSendOtp}
             >
-              <Text style={styles.primaryButtonText}>Send OTP</Text>
+              <Text style={styles.primaryButtonText}>
+                {otpSending ? 'Sending…' : 'Send OTP'}
+              </Text>
             </TouchableOpacity>
+
+            {formError ? <Text style={styles.errorText}>{formError}</Text> : null}
+            {otpError ? <Text style={styles.errorText}>{otpError}</Text> : null}
 
             {otpSent && (
               <View style={{ marginTop: 18 }}>
@@ -244,7 +510,7 @@ const OwnerRegistrationScreen = ({ navigation }) => {
                 <TouchableOpacity
                   style={styles.resendWrapper}
                   onPress={handleResend}
-                  disabled={resendTimer > 0}
+                  disabled={resendTimer > 0 || otpSending || isVerifying}
                 >
                   <Text style={[styles.resendText, resendTimer > 0 && styles.resendDisabled]}>
                     {resendTimer > 0 ? `Resend OTP in ${resendTimer}s` : 'Resend OTP'}
@@ -255,8 +521,34 @@ const OwnerRegistrationScreen = ({ navigation }) => {
           </View>
         </View>
 
-        <TouchableOpacity style={styles.submitButton} onPress={handleSubmit}>
-          <Text style={styles.submitButtonText}>Submit for Verification</Text>
+        <TouchableOpacity
+          onPress={async () => {
+            try {
+              console.log('TEST WRITE: starting');
+              const db = firebase.firestore();
+              const r = await db.collection('__debug_test_writes').add({ ts: Date.now(), note: 'debug' });
+              console.log('TEST WRITE: success id=', r.id);
+              Alert.alert('OK', 'Test write id: ' + r.id);
+            } catch (e) {
+              console.error('TEST WRITE ERROR:', e, 'code:', e.code, 'message:', e.message);
+              Alert.alert('Test write failed', `${e.code || ''} ${e.message || JSON.stringify(e)}`);
+            }
+          }}
+          style={{ padding: 12, backgroundColor: '#eee', borderRadius: 8, marginHorizontal: 16, marginTop: 12 }}
+        >
+          <Text>Run Firestore test write</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.submitButton, (loading || isVerifying) && styles.primaryButtonDisabled]}
+          onPress={handleSubmit}
+          disabled={loading || isVerifying}
+        >
+          {loading ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.submitButtonText}>Submit for Verification</Text>
+          )}
         </TouchableOpacity>
       </ScrollView>
 

@@ -1,152 +1,344 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
+  ActivityIndicator,
+  Linking,
   SafeAreaView,
   ScrollView,
-  ActivityIndicator,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { COLORS, FONTS } from '../constants/theme';
-import { CURRENT_OWNER_ID } from '../constants/currentUser';
-import { getBookingsByOwner } from '../services/bookingsService';
+import { Ionicons } from '@expo/vector-icons';
 
-const statusStyles = {
-  pending: { background: '#fff4e5', text: '#f97316', label: 'Pending' },
-  confirmed: { background: '#dbeafe', text: '#1d4ed8', label: 'Confirmed' },
+import { COLORS, FONTS, SIZES } from '../constants/theme';
+import { useAuth } from '../src/context/AuthContext';
+import {
+  getBookingsByOwner,
+  updateBookingPayment,
+  updateBookingStatus,
+} from '../services/bookingsService';
+
+const FILTER_TABS = [
+  { key: 'all', label: 'All' },
+  { key: 'pending', label: 'Upcoming' },
+  { key: 'confirmed', label: 'Ongoing' },
+  { key: 'completed', label: 'Completed' },
+  { key: 'cancelled', label: 'Cancelled' },
+];
+
+const STATUS_META = {
+  pending: { background: '#fff4e5', text: '#f97316', label: 'Upcoming' },
+  confirmed: { background: '#dbeafe', text: '#1d4ed8', label: 'Ongoing' },
   completed: { background: '#dcfce7', text: '#15803d', label: 'Completed' },
   cancelled: { background: '#fee2e2', text: '#b91c1c', label: 'Cancelled' },
 };
 
-const OwnerBookingsScreen = ({ route }) => {
+const OwnerBookingsScreen = ({ navigation }) => {
   const insets = useSafeAreaInsets();
-  const { carId, carTitle, plateNumber } = route.params || {};
+  const { user } = useAuth();
+  const ownerId = user?.id;
+
   const [bookings, setBookings] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [activeFilter, setActiveFilter] = useState('all');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [actionLoadingId, setActionLoadingId] = useState(null);
+  const [paymentLoadingId, setPaymentLoadingId] = useState(null);
 
-  useEffect(() => {
-    const loadBookings = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const remoteBookings = await getBookingsByOwner(CURRENT_OWNER_ID);
+  const loadBookings = useCallback(async () => {
+    if (!ownerId) {
+      setError('Owner not signed in.');
+      setBookings([]);
+      return;
+    }
 
-        if (!Array.isArray(remoteBookings)) {
-          setError('Unable to load bookings right now.');
-          setBookings([]);
-          return;
-        }
+    try {
+      setLoading(true);
+      setError('');
+      const allBookings = await getBookingsByOwner(ownerId);
+      setBookings(Array.isArray(allBookings) ? allBookings : []);
+    } catch (err) {
+      console.error("❌ Failed to load owner's bookings", err);
+      setError('Failed to load bookings.');
+      setBookings([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [ownerId]);
 
-        const filtered = carId
-          ? remoteBookings.filter((booking) => booking.carId === carId)
-          : remoteBookings;
-
-        setBookings(filtered);
-      } catch (err) {
-        console.error('OwnerBookings load error:', err);
-        setError('Unable to load bookings right now.');
-        setBookings([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-
+  React.useEffect(() => {
     loadBookings();
-  }, [carId]);
+  }, [loadBookings]);
+
+  const filteredBookings = useMemo(() => {
+    if (activeFilter === 'all') {
+      return bookings;
+    }
+    return bookings.filter((b) => (b.status || '').toLowerCase() === activeFilter);
+  }, [bookings, activeFilter]);
+
+  const handleStatusChange = async (bookingId, currentStatus, targetStatus) => {
+    if (currentStatus === targetStatus) return;
+    try {
+      setActionLoadingId(bookingId);
+      await updateBookingStatus(bookingId, targetStatus);
+      setBookings((prev) =>
+        prev.map((booking) =>
+          booking.id === bookingId ? { ...booking, status: targetStatus } : booking,
+        ),
+      );
+    } catch (err) {
+      console.error('Failed to update booking status', err);
+      alert('Failed to update booking status.');
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handlePaymentUpdate = async (bookingId, method) => {
+    try {
+      setPaymentLoadingId(bookingId);
+      await updateBookingPayment(bookingId, 'paid', method);
+      setBookings((prev) =>
+        prev.map((booking) =>
+          booking.id === bookingId
+            ? { ...booking, paymentStatus: 'paid', paymentMethod: method }
+            : booking,
+        ),
+      );
+    } catch (err) {
+      console.error('Failed to update payment status', err);
+      alert('Failed to update payment status.');
+    } finally {
+      setPaymentLoadingId(null);
+    }
+  };
+
+  const handleChat = (booking) => {
+    navigation.navigate('ChatWithDriver', {
+      bookingId: booking.id,
+      driverName: booking.driverName || booking.userName,
+      driverPhone: booking.driverPhone || booking.userPhone,
+      ownerId,
+      userId: booking.userId,
+    });
+  };
+
+  const handleCall = (phone) => {
+    if (!phone) return;
+    Linking.openURL(`tel:${phone}`);
+  };
+
+  const renderStatusPill = (statusRaw) => {
+    const meta = STATUS_META[statusRaw] || STATUS_META.pending;
+    return (
+      <View style={[styles.statusPill, { backgroundColor: meta.background }]}>
+        <Text style={[styles.statusPillText, { color: meta.text }]}>{meta.label}</Text>
+      </View>
+    );
+  };
+
+  const renderBookingCard = (booking) => {
+    const status = (booking.status || '').toLowerCase();
+    const isBusy = actionLoadingId === booking.id;
+    const isPaying = paymentLoadingId === booking.id;
+    const driverName = booking.driverName || booking.userName || 'Driver';
+    const driverPhone = booking.driverPhone || booking.userPhone || '';
+    const showContact = ['pending', 'confirmed'].includes(status);
+    const priceText = booking.price ? `₹${booking.price}/day` : '₹0/day';
+
+    return (
+      <TouchableOpacity
+        key={booking.id}
+        activeOpacity={0.9}
+        style={styles.card}
+        onPress={() =>
+          navigation.navigate('CarBookings', {
+            carId: booking.carId,
+            carTitle: booking.carName || booking.carTitle || 'Car',
+            plateNumber: booking.plateNumber || booking.carPlate || '',
+          })
+        }
+      >
+        <View style={styles.cardHeaderRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.cardTitle}>{driverName}</Text>
+            {!!driverPhone && <Text style={styles.cardSubline}>{driverPhone}</Text>}
+            <Text style={styles.cardSubline}>
+              {booking.carName || booking.carTitle || 'Car'} • {booking.plateNumber || '—'}
+            </Text>
+          </View>
+          {renderStatusPill(status)}
+        </View>
+
+        <View style={styles.detailGrid}>
+          <View style={styles.detailColumn}>
+            <Text style={styles.detailLabel}>Date</Text>
+            <Text style={styles.detailValue}>{booking.bookingDate || '—'}</Text>
+          </View>
+          <View style={styles.detailColumn}>
+            <Text style={styles.detailLabel}>Time</Text>
+            <Text style={styles.detailValue}>{booking.bookingTime || '—'}</Text>
+          </View>
+          <View style={styles.detailColumn}>
+            <Text style={styles.detailLabel}>Duration</Text>
+            <Text style={styles.detailValue}>{booking.duration || '1 day'}</Text>
+          </View>
+          <View style={styles.detailColumn}>
+            <Text style={styles.detailLabel}>Price</Text>
+            <Text style={[styles.detailValue, { color: COLORS.primary }]}>{priceText}</Text>
+          </View>
+        </View>
+
+        <View style={styles.paymentMetaRow}>
+          <Text style={styles.metaLabel}>Payment</Text>
+          <Text style={styles.metaValue}>
+            {(booking.paymentStatus || 'unpaid').toUpperCase()} ({
+              booking.paymentMethod || 'pending'
+            })
+          </Text>
+        </View>
+
+        {booking.paymentStatus !== 'paid' && (
+          <View style={styles.paymentRow}>
+            <TouchableOpacity
+              style={[styles.paymentButton, styles.paymentButtonCash]}
+              disabled={isPaying}
+              onPress={() => handlePaymentUpdate(booking.id, 'cash')}
+            >
+              <Ionicons name="cash-outline" size={16} color="#166534" />
+              <Text style={styles.paymentButtonText}>{isPaying ? 'Updating…' : 'Paid (Cash)'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.paymentButton, styles.paymentButtonOnline]}
+              disabled={isPaying}
+              onPress={() => handlePaymentUpdate(booking.id, 'online')}
+            >
+              <Ionicons name="card-outline" size={16} color="#1d4ed8" />
+              <Text style={styles.paymentButtonText}>{isPaying ? 'Updating…' : 'Paid (Online)'}</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {showContact && (
+          <View style={styles.contactRow}>
+            <TouchableOpacity style={styles.ctaButton} onPress={() => handleChat(booking)}>
+              <Ionicons name="chatbubble-outline" size={16} color={COLORS.primary} />
+              <Text style={styles.ctaButtonText}>Chat</Text>
+            </TouchableOpacity>
+            {!!driverPhone && (
+              <TouchableOpacity style={styles.ctaButton} onPress={() => handleCall(driverPhone)}>
+                <Ionicons name="call-outline" size={16} color={COLORS.primary} />
+                <Text style={styles.ctaButtonText}>Call</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {status !== 'completed' && status !== 'cancelled' && (
+          <View style={styles.actionsRow}>
+            {status === 'pending' && (
+              <TouchableOpacity
+                style={styles.primaryAction}
+                disabled={isBusy}
+                onPress={() => handleStatusChange(booking.id, status, 'confirmed')}
+              >
+                <Text style={styles.primaryActionText}>{isBusy ? 'Updating…' : 'Confirm'}</Text>
+              </TouchableOpacity>
+            )}
+
+            {status === 'confirmed' && (
+              <TouchableOpacity
+                style={styles.primaryAction}
+                disabled={isBusy}
+                onPress={() => handleStatusChange(booking.id, status, 'completed')}
+              >
+                <Text style={styles.primaryActionText}>{isBusy ? 'Updating…' : 'Mark Completed'}</Text>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity
+              style={styles.secondaryAction}
+              disabled={isBusy}
+              onPress={() => handleStatusChange(booking.id, status, 'cancelled')}
+            >
+              <Text style={styles.secondaryActionText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </TouchableOpacity>
+    );
+  };
 
   const renderContent = () => {
     if (loading) {
       return (
-        <View style={styles.centered}>
+        <View style={styles.centerBox}>
           <ActivityIndicator size="small" color={COLORS.primary} />
-          <Text style={styles.helperText}>Loading bookings…</Text>
+          <Text style={styles.centerText}>Loading bookings…</Text>
         </View>
       );
     }
 
     if (error) {
       return (
-        <View style={styles.centered}>
-          <Text style={styles.helperText}>{error}</Text>
+        <View style={styles.centerBox}>
+          <Text style={styles.errorText}>{error}</Text>
         </View>
       );
     }
 
-    if (!bookings.length) {
+    if (!filteredBookings.length) {
       return (
-        <View style={styles.centered}>
-          <Text style={styles.helperText}>No bookings found for this car yet.</Text>
+        <View style={styles.centerBox}>
+          <Ionicons name="calendar-outline" size={42} color="#9ca3af" />
+          <Text style={styles.emptyTitle}>No bookings yet</Text>
+          <Text style={styles.emptyText}>When drivers book your cars, they will appear here.</Text>
         </View>
       );
     }
 
     return (
-      <ScrollView
-        style={styles.list}
-        contentContainerStyle={{ paddingBottom: 48 }}
-        showsVerticalScrollIndicator={false}
-      >
-        {bookings.map((booking) => {
-          const normalizedStatus = (booking.status || 'pending').toLowerCase();
-          const statusStyle = statusStyles[normalizedStatus] || statusStyles.pending;
-
-          return (
-            <View key={booking.id} style={styles.card}>
-              <View style={styles.cardHeader}>
-                <View>
-                  <Text style={styles.driverName}>
-                    {booking.driverName || booking.userName || 'Driver'}
-                  </Text>
-                  <Text style={styles.driverContact}>
-                    {booking.driverPhone || booking.userPhone || 'Contact n/a'}
-                  </Text>
-                </View>
-                <View style={[styles.statusPill, { backgroundColor: statusStyle.background }]}>
-                  <Text style={[styles.statusText, { color: statusStyle.text }]}>
-                    {statusStyle.label}
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Pickup</Text>
-                <Text style={styles.detailValue}>
-                  {booking.bookingDate || '-'}
-                  {booking.bookingTime ? ` • ${booking.bookingTime}` : ''}
-                </Text>
-              </View>
-
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Price / day</Text>
-                <Text style={styles.priceValue}>
-                  {booking.price ? `₹${booking.price}` : '₹0'}
-                </Text>
-              </View>
-
-              {booking.notes ? (
-                <View style={styles.notesBox}>
-                  <Text style={styles.notesLabel}>Notes</Text>
-                  <Text style={styles.notesText}>{booking.notes}</Text>
-                </View>
-              ) : null}
-            </View>
-          );
-        })}
-      </ScrollView>
+      <View style={{ gap: 14 }}>
+        {filteredBookings.map((booking) => renderBookingCard(booking))}
+      </View>
     );
   };
 
   return (
     <SafeAreaView
-      style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}
+      style={[styles.container, { paddingTop: insets.top, paddingBottom: Math.max(insets.bottom, 16) }]}
     >
-      <View style={styles.header}>
-        <Text style={styles.title}>{carTitle || 'Car bookings'}</Text>
-        <Text style={styles.subtitle}>{plateNumber || carId || '—'}</Text>
+      <View style={styles.headerRow}>
+        <Text style={styles.headerTitle}>Your Bookings</Text>
       </View>
-      {renderContent()}
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.filterTabsRow}
+      >
+        {FILTER_TABS.map((tab) => {
+          const isActive = activeFilter === tab.key;
+          return (
+            <TouchableOpacity
+              key={tab.key}
+              style={[styles.filterChip, isActive && styles.filterChipActive]}
+              onPress={() => setActiveFilter(tab.key)}
+            >
+              <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>
+                {tab.label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+        {renderContent()}
+      </ScrollView>
     </SafeAreaView>
   );
 };
@@ -155,54 +347,89 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
-    paddingHorizontal: 20,
   },
-  header: {
+  headerRow: {
+    paddingHorizontal: 16,
     paddingVertical: 16,
   },
-  title: {
-    ...FONTS.h2,
-    marginBottom: 4,
+  headerTitle: {
+    ...FONTS.h3,
+    fontWeight: '600',
+    color: COLORS.text,
   },
-  subtitle: {
-    ...FONTS.body2,
-    color: COLORS.textSecondary,
+  filterTabsRow: {
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+    gap: 10,
   },
-  list: {
-    flex: 1,
+  filterChip: {
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+    backgroundColor: '#e5e7eb',
+    borderRadius: 999,
+    marginRight: 8,
   },
-  centered: {
-    flex: 1,
-    justifyContent: 'center',
+  filterChipActive: {
+    backgroundColor: '#1f7cff',
+  },
+  filterChipText: {
+    ...FONTS.body3,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  filterChipTextActive: {
+    color: '#fff',
+  },
+  listContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 120,
+  },
+  centerBox: {
+    marginTop: 60,
     alignItems: 'center',
   },
-  helperText: {
+  centerText: {
     ...FONTS.body3,
     color: COLORS.textSecondary,
     marginTop: 8,
+  },
+  errorText: {
+    ...FONTS.body3,
+    color: '#b91c1c',
     textAlign: 'center',
+  },
+  emptyTitle: {
+    ...FONTS.body1,
+    fontWeight: '600',
+    marginTop: 12,
+  },
+  emptyText: {
+    ...FONTS.body3,
+    color: COLORS.textSecondary,
+    textAlign: 'center',
+    marginTop: 6,
   },
   card: {
     backgroundColor: '#fff',
-    borderRadius: 20,
+    borderRadius: 18,
     padding: 16,
-    marginBottom: 16,
-    shadowColor: '#00000010',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.1,
+    shadowColor: '#00000012',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.08,
     shadowRadius: 12,
     elevation: 3,
   },
-  cardHeader: {
+  cardHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 12,
+    gap: 12,
   },
-  driverName: {
+  cardTitle: {
     ...FONTS.body1,
     fontWeight: '600',
   },
-  driverContact: {
+  cardSubline: {
     ...FONTS.body3,
     color: COLORS.textSecondary,
     marginTop: 2,
@@ -213,42 +440,120 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     alignSelf: 'flex-start',
   },
-  statusText: {
+  statusPillText: {
     ...FONTS.body3,
     fontWeight: '600',
   },
-  detailRow: {
+  detailGrid: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 6,
+    flexWrap: 'wrap',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 14,
+    padding: 12,
+    gap: 12,
+    marginTop: 12,
+  },
+  detailColumn: {
+    width: '48%',
   },
   detailLabel: {
-    ...FONTS.body3,
+    ...FONTS.body4,
     color: COLORS.textSecondary,
   },
   detailValue: {
-    ...FONTS.body3,
-    fontWeight: '600',
-  },
-  priceValue: {
     ...FONTS.body2,
-    color: COLORS.primary,
-    fontWeight: '700',
+    color: COLORS.text,
   },
-  notesBox: {
-    marginTop: 12,
-    padding: 12,
-    backgroundColor: '#f5f7fb',
-    borderRadius: 12,
+  paymentMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 14,
   },
-  notesLabel: {
-    ...FONTS.body4,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  notesText: {
+  metaLabel: {
     ...FONTS.body3,
     color: COLORS.textSecondary,
+  },
+  metaValue: {
+    ...FONTS.body3,
+    fontWeight: '600',
+  },
+  paymentRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  paymentButton: {
+    flex: 1,
+    borderRadius: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  paymentButtonCash: {
+    backgroundColor: '#ecfdf5',
+  },
+  paymentButtonOnline: {
+    backgroundColor: '#eef2ff',
+  },
+  paymentButtonText: {
+    ...FONTS.body3,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  contactRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  ctaButton: {
+    flex: 1,
+    borderRadius: 12,
+    paddingVertical: 10,
+    backgroundColor: '#f1f5ff',
+    borderWidth: 1,
+    borderColor: '#cfe1ff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  ctaButtonText: {
+    ...FONTS.body3,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 14,
+  },
+  primaryAction: {
+    flex: 1,
+    backgroundColor: COLORS.primary,
+    borderRadius: 999,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  primaryActionText: {
+    ...FONTS.body3,
+    color: COLORS.background,
+    fontWeight: '600',
+  },
+  secondaryAction: {
+    flex: 1,
+    borderRadius: 999,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    alignItems: 'center',
+  },
+  secondaryActionText: {
+    ...FONTS.body3,
+    fontWeight: '600',
+    color: '#4b5563',
   },
 });
 

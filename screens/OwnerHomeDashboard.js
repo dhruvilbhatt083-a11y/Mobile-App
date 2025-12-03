@@ -1,4 +1,4 @@
-import React, { useMemo, useEffect, useState, useCallback } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -8,13 +8,16 @@ import {
   Image,
   FlatList,
   ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { COLORS, SIZES, FONTS } from '../constants/theme';
-import { fetchCars } from '../services/carsService';
+// Use modular Firestore service for cars (shared with AddCarScreen)
+import { fetchCars } from '../src/services/carsService';
 import { getBookingsByOwner, getOwnerEarnings } from '../services/bookingsService';
+import { useAuth } from '../src/context/AuthContext';
 
 // 🔹 Local dummy as fallback ONLY if Firestore has nothing / fails
 const fallbackCars = [
@@ -53,56 +56,56 @@ const statusMap = {
   Inactive: { background: '#f4f4f5', text: '#6b7280' },
 };
 
-const OwnerHomeDashboard = ({ navigation }) => {
+const OwnerHomeDashboard = ({ navigation, route }) => {
   const insets = useSafeAreaInsets();
+  const { user } = useAuth();
+  const ownerId = user?.id || route?.params?.ownerId || null;
 
   const [cars, setCars] = useState([]);
-  const [bookings, setBookings] = useState([]); // 🔹 owner bookings
+  const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
   const [earningsCard, setEarningsCard] = useState({
     amount: '₹0',
     summary: 'From 0 completed paid bookings',
   });
 
-  // TEMP: hard-coded owner id, must match booking.ownerId in Firestore
-  const ownerId = 'owner_001';
+  const loadData = useCallback(async ({ skipSpinner = false } = {}) => {
+    if (!ownerId) {
+      console.warn('OwnerHomeDashboard: no ownerId available in context/route');
+      setError('No owner ID — please log in again.');
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
 
-  const loadData = useCallback(async () => {
+    setError(null);
     try {
-      setLoading(true);
-      console.log('🔍 Loading cars + bookings for owner dashboard...');
-
-      // 1) Load cars
-      const remoteCars = await fetchCars();
-      console.log('✅ Cars from Firestore:', remoteCars);
-
-      let normalizedCars;
-      if (Array.isArray(remoteCars) && remoteCars.length > 0) {
-        normalizedCars = remoteCars.map((car) => ({
-          id: car.id,
-          name: car.name || car.title || 'Car',
-          numberPlate:
-            car.numberPlate || car.plateNumber || car.registration || '—',
-          status: car.status || 'Available',
-          pricePerDay: Number(car.pricePerDay || car.price || 0),
-          imageUrl:
-            car.imageUrl ||
-            car.image ||
-            'https://images.unsplash.com/photo-1511919884226-fd3cad34687c?auto=format&fit=crop&w=600&q=60',
-        }));
-      } else {
-        console.log('ℹ️ No cars in Firestore, using fallbackCars');
-        normalizedCars = fallbackCars;
+      if (!skipSpinner) {
+        setLoading(true);
       }
+
+      const remoteCars = await fetchCars(ownerId);
+
+      const normalizedCars = (Array.isArray(remoteCars) ? remoteCars : []).map((car) => ({
+        id: car.id,
+        name: car.name || car.title || 'Car',
+        numberPlate:
+          car.numberPlate || car.plateNumber || car.registration || '—',
+        status: car.status || 'Available',
+        pricePerDay: Number(car.pricePerDay || car.price || 0),
+        imageUrl:
+          car.imageUrl ||
+          car.image ||
+          'https://images.unsplash.com/photo-1511919884226-fd3cad34687c?auto=format&fit=crop&w=600&q=60',
+      }));
 
       setCars(normalizedCars);
 
-      // 2) Load bookings for this owner
       const ownerBookings = await getBookingsByOwner(ownerId);
-      console.log('🔥 Owner bookings from Firestore:', ownerBookings);
       setBookings(ownerBookings || []);
 
-      // 3) Load earnings summary
       const earningsResult = await getOwnerEarnings(ownerId);
       const formattedAmount = `₹${Number(
         earningsResult.totalAmount || 0,
@@ -113,7 +116,8 @@ const OwnerHomeDashboard = ({ navigation }) => {
       }`;
       setEarningsCard({ amount: formattedAmount, summary: summaryText });
     } catch (error) {
-      console.error('❌ Error loading owner dashboard data:', error);
+      console.error('Owner dashboard load error', error);
+      setError('Failed to load dashboard. Pull to retry.');
       setCars(fallbackCars);
       setBookings([]);
       setEarningsCard({
@@ -122,18 +126,20 @@ const OwnerHomeDashboard = ({ navigation }) => {
       });
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [ownerId]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
 
   useFocusEffect(
     useCallback(() => {
       loadData();
     }, [loadData]),
   );
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    loadData({ skipSpinner: true });
+  }, [loadData]);
 
   const handleAddCar = () => {
     navigation.navigate('AddNewCar');
@@ -155,29 +161,26 @@ const OwnerHomeDashboard = ({ navigation }) => {
     });
   };
 
-  // 🔎 Helper: find current active booking for a car
-  const getActiveBookingForCar = (carId) => {
-    if (!carId || !Array.isArray(bookings)) return null;
-
-    // Simple rule: active = not completed and not cancelled
-    return bookings.find((b) => {
-      const status = (b.status || '').toLowerCase();
-      return (
-        b.carId === carId &&
-        status !== 'completed' &&
-        status !== 'cancelled'
-      );
+  const bookingsByCarId = useMemo(() => {
+    const map = new Map();
+    if (!Array.isArray(bookings)) return map;
+    bookings.forEach((booking) => {
+      if (!booking?.carId) return;
+      const status = (booking.status || '').toLowerCase();
+      const isActive = status !== 'completed' && status !== 'cancelled';
+      if (isActive && !map.has(booking.carId)) {
+        map.set(booking.carId, booking);
+      }
     });
-  };
+    return map;
+  }, [bookings]);
 
   const renderCarCard = ({ item }) => {
-    const activeBooking = getActiveBookingForCar(item.id);
+    const activeBooking = bookingsByCarId.get(item.id) || null;
 
-    // If there is an active booking, override status to "Booked"
     const effectiveStatus = activeBooking ? 'Booked' : item.status || 'Available';
     const badge = statusMap[effectiveStatus] || statusMap.Available;
 
-    // Try to display a friendly driver label
     const driverLabel =
       activeBooking?.driverName ||
       activeBooking?.userName ||
@@ -245,6 +248,19 @@ const OwnerHomeDashboard = ({ navigation }) => {
     </View>
   );
 
+  if (!ownerId) {
+    return (
+      <SafeAreaView style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={{ padding: 24 }}>
+          <Text style={{ ...FONTS.body1, marginBottom: 12 }}>Owner not signed in</Text>
+          <Text style={{ ...FONTS.body3, color: COLORS.textSecondary }}>
+            Please login as an owner to see your dashboard.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.headerRow}>
@@ -286,20 +302,17 @@ const OwnerHomeDashboard = ({ navigation }) => {
         </View>
       </View>
 
-      {loading ? (
-        <View
-          style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
-        >
+      {loading && !refreshing ? (
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <ActivityIndicator size="small" color={COLORS.primary} />
-          <Text
-            style={{
-              ...FONTS.body3,
-              color: COLORS.textSecondary,
-              marginTop: 8,
-            }}
-          >
+          <Text style={{ ...FONTS.body3, color: COLORS.textSecondary, marginTop: 8 }}>
             Loading your cars…
           </Text>
+          {error ? (
+            <TouchableOpacity onPress={loadData} style={{ marginTop: 12 }}>
+              <Text style={{ color: '#1f7cff' }}>Retry</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       ) : (
         <FlatList
@@ -309,6 +322,17 @@ const OwnerHomeDashboard = ({ navigation }) => {
           showsVerticalScrollIndicator={false}
           renderItem={renderCarCard}
           ListEmptyComponent={renderEmpty}
+          ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={COLORS.primary}
+            />
+          }
+          initialNumToRender={4}
+          maxToRenderPerBatch={6}
+          windowSize={11}
         />
       )}
 
@@ -399,8 +423,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   listContent: {
-    paddingBottom: 120,
-    gap: 12,
+    paddingBottom: 140,
   },
   carCard: {
     flexDirection: 'row',

@@ -14,19 +14,29 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS, FONTS } from '../constants/theme';
 import { useAuth } from '../src/context/AuthContext';
 import { findUserByPhone } from '../src/services/usersService';
+import firebase from 'firebase/compat/app';
+import 'firebase/compat/firestore';
 
-const OTP_LENGTH = 4;
+const OWNER_OTP_LENGTH = 6;
+const DRIVER_OTP_LENGTH = 4;
+const RESEND_SECONDS = 30;
+const OTP_TTL_MS = 5 * 60 * 1000;
+const normalizePhone = (raw = '') => raw.replace(/\D/g, '').slice(-10);
 
 const MobileOtpLoginScreen = ({ navigation, route }) => {
   const insets = useSafeAreaInsets();
   const userRole = route?.params?.userRole === 'Owner' ? 'Owner' : 'Driver';
-  const { loginDriverByPhone, authLoading } = useAuth();
+  const isOwner = userRole === 'Owner';
+  const OTP_LENGTH = isOwner ? OWNER_OTP_LENGTH : DRIVER_OTP_LENGTH;
+  const { loginDriverByPhone, loginOwnerByPhone, authLoading } = useAuth();
 
   const [phoneNumber, setPhoneNumber] = useState('');
   const [otpSent, setOtpSent] = useState(false);
   const [resendTimer, setResendTimer] = useState(0);
   const [errorMessage, setErrorMessage] = useState('');
   const [otpDigits, setOtpDigits] = useState(Array(OTP_LENGTH).fill(''));
+  const [otpSending, setOtpSending] = useState(false);
+  const [ownerId, setOwnerId] = useState(null);
   const buttonScale = useRef(new Animated.Value(0)).current;
   const otpInputRefs = useRef([]);
 
@@ -69,11 +79,17 @@ const MobileOtpLoginScreen = ({ navigation, route }) => {
     }
     setErrorMessage('');
 
+    const normalizedPhone = normalizePhone(phoneNumber);
+
     if (userRole === 'Driver') {
       try {
-        const existing = await findUserByPhone(phoneNumber, 'driver');
+        const existing = await findUserByPhone(normalizedPhone);
         if (!existing) {
           setErrorMessage('User not found. Please register first.');
+          return;
+        }
+        if ((existing.role || '').toLowerCase() !== 'driver') {
+          setErrorMessage('This number is not registered as a driver.');
           return;
         }
       } catch (error) {
@@ -81,12 +97,33 @@ const MobileOtpLoginScreen = ({ navigation, route }) => {
         setErrorMessage('Something went wrong. Please try again.');
         return;
       }
+
+      setOtpSent(true);
+      setResendTimer(RESEND_SECONDS);
+      setOtpDigits(Array(OTP_LENGTH).fill(''));
+      otpInputRefs.current[0]?.focus();
+      return;
     }
 
-    setOtpSent(true);
-    setResendTimer(30);
-    setOtpDigits(Array(OTP_LENGTH).fill(''));
-    otpInputRefs.current[0]?.focus();
+    try {
+      setOtpSending(true);
+      const existing = await findUserByPhone(normalizedPhone);
+      if (!existing) {
+        setErrorMessage('Owner not found. Please register first.');
+        return;
+      }
+      setOwnerId(existing.id);
+      await sendMockOtp(normalizedPhone, existing.id);
+      setOtpSent(true);
+      setResendTimer(RESEND_SECONDS);
+      setOtpDigits(Array(OTP_LENGTH).fill(''));
+      otpInputRefs.current[0]?.focus();
+    } catch (error) {
+      console.log('owner otp send error', error);
+      setErrorMessage(error?.message || 'Failed to send OTP. Please try again.');
+    } finally {
+      setOtpSending(false);
+    }
   };
 
   const handleOtpChange = (value, index) => {
@@ -116,14 +153,16 @@ const MobileOtpLoginScreen = ({ navigation, route }) => {
 
     const enteredOtp = otpDigits.join('').trim();
     if (enteredOtp.length < OTP_LENGTH) {
-      setErrorMessage('Enter valid OTP (try 1234 for now).');
+      setErrorMessage(
+        isOwner ? 'Enter the 6-digit OTP shown in the console.' : 'Enter valid OTP (try 1234 for now).',
+      );
       return;
     }
     setErrorMessage('');
 
     if (userRole === 'Driver') {
       try {
-        await loginDriverByPhone(phoneNumber);
+        await loginDriverByPhone(normalizedPhone);
         navigation.replace('DriverHome');
       } catch (error) {
         console.log('Login error', error);
@@ -151,12 +190,47 @@ const MobileOtpLoginScreen = ({ navigation, route }) => {
       return;
     }
 
-    navigation.replace('OwnerHome');
+    const normalizedPhone = normalizePhone(phoneNumber);
+    const verifiedOwnerId = await verifyOwnerOtp(normalizedPhone, enteredOtp);
+    if (!verifiedOwnerId) {
+      setErrorMessage('Invalid or expired OTP. Please try again.');
+      setOtpDigits(Array(OTP_LENGTH).fill(''));
+      otpInputRefs.current[0]?.focus();
+      return;
+    }
+
+    try {
+      await loginOwnerByPhone(normalizedPhone);
+      navigation.replace('OwnerTabs');
+    } catch (error) {
+      console.log('Owner login error', error);
+      switch (error?.message) {
+        case 'USER_NOT_FOUND':
+          setErrorMessage('Owner not found. Please register first.');
+          break;
+        case 'NOT_OWNER':
+          setErrorMessage('This number is not registered as an owner.');
+          break;
+        case 'USER_BLOCKED':
+          setErrorMessage('Your account is blocked. Contact support.');
+          break;
+        case 'KYC_NOT_APPROVED':
+          setErrorMessage('Your KYC is not approved yet. Please wait for admin approval.');
+          break;
+        default:
+          setErrorMessage('Something went wrong. Please try again.');
+      }
+    }
   };
 
   const handleResend = () => {
     if (resendTimer > 0) return;
-    setResendTimer(30);
+    if (isOwner) {
+      handleGetOtp();
+      return;
+    }
+    setOtpDigits(Array(OTP_LENGTH).fill(''));
+    setResendTimer(RESEND_SECONDS);
   };
 
   const handleRegister = () => {
@@ -168,7 +242,7 @@ const MobileOtpLoginScreen = ({ navigation, route }) => {
   };
 
   return (
-    <SafeAreaView style={[styles.container, { paddingTop: insets.top }] }>
+    <SafeAreaView style={[styles.container, { paddingTop: insets.top }]}>
       <ScrollView contentContainerStyle={[styles.scrollContent, { paddingBottom: Math.max(insets.bottom + 20, 32) }]}>
         <View style={styles.headerRow}>
           <TouchableOpacity style={styles.backButton} onPress={() => navigation.goBack()}>
@@ -216,11 +290,14 @@ const MobileOtpLoginScreen = ({ navigation, route }) => {
 
           {!otpSent ? (
             <TouchableOpacity
-              style={[styles.primaryButton, !isPhoneValid && styles.primaryButtonDisabled]}
+              style={[
+                styles.primaryButton,
+                (!isPhoneValid || otpSending) && styles.primaryButtonDisabled,
+              ]}
               onPress={handleGetOtp}
-              disabled={!isPhoneValid}
+              disabled={!isPhoneValid || otpSending}
             >
-              <Text style={styles.primaryButtonText}>Get OTP</Text>
+              <Text style={styles.primaryButtonText}>{otpSending ? 'Sending…' : 'Get OTP'}</Text>
             </TouchableOpacity>
           ) : (
             <Animated.View style={{ transform: [{ scale: buttonScale.interpolate({ inputRange: [0, 1], outputRange: [0.98, 1] }) }] }}>
@@ -472,3 +549,63 @@ const styles = StyleSheet.create({
 });
 
 export default MobileOtpLoginScreen;
+
+const sendMockOtp = async (targetPhoneNumber, targetOwnerId) => {
+  if (!targetPhoneNumber) {
+    throw new Error('PHONE_REQUIRED');
+  }
+
+  const db = firebase.firestore();
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const payload = {
+    phoneNumber: targetPhoneNumber,
+    code,
+    ownerId: targetOwnerId || null,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    expiresAt: Date.now() + OTP_TTL_MS,
+  };
+
+  await db.collection('ownerOtps').add(payload);
+
+  console.log('Owner login OTP', targetPhoneNumber, code);
+
+  return code;
+};
+
+const verifyOwnerOtp = async (phoneNumber, code) => {
+  try {
+    const db = firebase.firestore();
+    const snapshot = await db
+      .collection('ownerOtps')
+      .where('phoneNumber', '==', phoneNumber)
+      .orderBy('createdAt', 'desc')
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      return null;
+    }
+
+    const otpDoc = snapshot.docs[0];
+    const otpData = otpDoc.data();
+
+    if (otpData.expiresAt && Date.now() > otpData.expiresAt) {
+      return null;
+    }
+
+    if (otpData.code !== code) {
+      return null;
+    }
+
+    try {
+      await db.collection('ownerOtps').doc(otpDoc.id).delete();
+    } catch (error) {
+      console.warn('verifyOwnerOtp delete error', error);
+    }
+
+    return otpData.ownerId || null;
+  } catch (error) {
+    console.error('verifyOwnerOtp error', error);
+    return null;
+  }
+};

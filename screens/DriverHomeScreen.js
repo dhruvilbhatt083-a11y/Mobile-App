@@ -13,7 +13,7 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { COLORS, SIZES, FONTS } from "../constants/theme";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { fetchCars } from "../services/carsService";
+import { fetchCars } from "../src/services/carsService";
 import DriverBottomNav from "../components/DriverBottomNav";
 import { useAuth } from "../src/context/AuthContext";
 

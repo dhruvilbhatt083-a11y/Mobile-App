@@ -36,6 +36,7 @@ import OwnerBookingsScreen from '../screens/OwnerBookingsScreen';
 import EditCarScreen from '../screens/EditCarScreen';
 import AddNewCarScreen from '../screens/AddNewCarScreen';
 import CarBookingsScreen from '../screens/CarBookingsScreen';
+import OwnerTabNavigator from './OwnerTabNavigator';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -160,6 +161,11 @@ const AppNavigator = () => {
         options={{ headerShown: false }}
       />
       <Stack.Screen 
+        name="OwnerTabs" 
+        component={OwnerTabNavigator}
+        options={{ headerShown: false }}
+      />
+      <Stack.Screen 
         name="CarDetail" 
         component={CarDetailScreen}
         options={{ headerShown: false }}
@@ -237,7 +243,7 @@ const AppNavigator = () => {
       <Stack.Screen 
         name="AddNewCar" 
         component={AddNewCarScreen}
-        options={{ headerShown: false }}
+        options={{ title: 'Add Car' }}
       />
       <Stack.Screen 
         name="CarBookings" 

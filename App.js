@@ -1,8 +1,9 @@
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
-import { StatusBar } from 'expo-status-bar';
 import AppNavigator from './navigation/AppNavigator';
 import { AuthProvider } from './src/context/AuthContext';
+import { StatusBar } from 'expo-status-bar';
+import './src/services/firebaseCompat';
 
 export default function App() {
   return (

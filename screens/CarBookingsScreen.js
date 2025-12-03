@@ -19,6 +19,7 @@ import {
   updateBookingStatus,
   updateBookingPayment,
 } from '../services/bookingsService';
+import { useAuth } from '../src/context/AuthContext';
 
 const FILTER_TABS = [
   { key: 'all', label: 'All' },
@@ -35,7 +36,8 @@ const CarBookingsScreen = ({ route, navigation }) => {
   const carTitle = route?.params?.carTitle || 'Car';
   const plateNumber = route?.params?.plateNumber || '';
 
-  const ownerId = 'owner_001';
+  const { user } = useAuth();
+  const ownerId = user?.id || route?.params?.ownerId || null;
 
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
