@@ -13,6 +13,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS, SIZES, FONTS } from '../constants/theme';
 import { declareCashRentPayment } from '../services/bookingsService';
+import RequestReturnModal from '../src/components/RequestReturnModal';
+import { STATUS_LABELS } from '../src/constants/bookingStatus';
 
 const formatCurrency = (value) => {
   const numeric = Number(value);
@@ -40,6 +42,7 @@ const BookingDetailsScreen = ({ route, navigation }) => {
 
   const [payingOnline, setPayingOnline] = useState(false);
   const [declaringCash, setDeclaringCash] = useState(false);
+  const [rrVisible, setRrVisible] = useState(false);
 
   const durationLabel = durationDays === 1 ? '1 day' : `${durationDays} days`;
   const rentMeta = useMemo(() => {
@@ -103,6 +106,52 @@ const BookingDetailsScreen = ({ route, navigation }) => {
     }
   };
 
+  // normalize legacy status strings into canonical keys (same helper as BookingCard)
+  const normalizeStatus = (s) => {
+    if (!s) return null;
+    const t = String(s).trim().toLowerCase();
+
+    if (t === 'scheduled' || t === 'scheduled ') return 'requested';
+    if (t === 'confirmed' || t === 'active') return 'in_use';
+    if (t === 'return_requested' || t === 'return requested') return 'return_requested';
+    if (t === 'return approved' || t === 'return_approved') return 'ready_for_pickup';
+    if (t === 'completed' || t === 'done') return 'completed';
+    if (t === 'cancelled' || t === 'canceled') return 'cancelled';
+    if (t === 'upcoming') return 'requested';
+
+    return t;
+  };
+
+  const rawStatus =
+    booking?.status ??
+    (booking?.bookingStatus && booking.bookingStatus.trim()) ??
+    (booking?.raw?.bookingStatus && booking.raw.bookingStatus);
+  const displayedStatus = normalizeStatus(rawStatus) || rawStatus || null;
+  const statusLabel = STATUS_LABELS[displayedStatus] || (displayedStatus ? displayedStatus : '—');
+
+  const canRequestReturn = ['in_use', 'return_requested'].includes(
+    displayedStatus?.toLowerCase?.() || '',
+  );
+  const driverId = booking?.driverId || booking?.userId || route.params?.driverId || null;
+  const ownerId = booking?.ownerId || route.params?.ownerId || null;
+  const ownerName = booking?.ownerName || route.params?.ownerName || 'Owner';
+  const chatBookingId = booking?.bookingId || bookingId;
+  const carNameForChat = car?.name || booking?.carName || 'Car';
+
+  const handleContactOwner = () => {
+    if (!ownerId || !chatBookingId) {
+      Alert.alert('Contact unavailable', 'Owner contact is not available for this booking yet.');
+      return;
+    }
+
+    navigation.navigate('ChatWithOwner', {
+      bookingId: chatBookingId,
+      ownerId,
+      carName: carNameForChat,
+      ownerName,
+    });
+  };
+
   return (
     <SafeAreaView style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.headerBar}>
@@ -161,7 +210,7 @@ const BookingDetailsScreen = ({ route, navigation }) => {
               <Text style={styles.infoLabel}>Status</Text>
             </View>
             <View style={styles.statusPillBlue}>
-              <Text style={styles.statusPillText}>Upcoming</Text>
+              <Text style={styles.statusPillText}>{statusLabel}</Text>
             </View>
           </View>
 
@@ -230,6 +279,17 @@ const BookingDetailsScreen = ({ route, navigation }) => {
             </View>
           ) : null}
         </View>
+
+        {ownerId ? (
+          <View style={styles.infoCard}>
+            <Text style={styles.sectionTitle}>Owner Contact</Text>
+            <Text style={styles.ownerContactLabel}>Owner contact: (via app only)</Text>
+            <TouchableOpacity style={styles.ownerContactButton} onPress={handleContactOwner}>
+              <Ionicons name="chatbubble-ellipses-outline" size={16} color="#1f7cff" />
+              <Text style={styles.ownerContactAction}>Contact via App</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
       </ScrollView>
 
       <View style={[styles.actionFooter, { paddingBottom: Math.max(insets.bottom + 12, 24) }]}>
@@ -254,9 +314,31 @@ const BookingDetailsScreen = ({ route, navigation }) => {
             {declaringCash ? 'Submitting…' : 'I will pay cash'}
           </Text>
         </TouchableOpacity>
+
+        {canRequestReturn && (
+          <TouchableOpacity
+            style={[styles.actionButton, styles.requestReturnButton]}
+            onPress={() => setRrVisible(true)}
+          >
+            <Ionicons name="flag-outline" size={18} color="#1f7cff" />
+            <Text style={[styles.actionButtonText, styles.requestReturnText]}>
+              Request Return / End Trip
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       <View style={{ height: Math.max(insets.bottom, SIZES.base) }} />
+
+      <RequestReturnModal
+        visible={rrVisible}
+        onClose={() => setRrVisible(false)}
+        booking={booking || { id: bookingId }}
+        driverId={driverId}
+        onSuccess={() => {
+          Alert.alert('Return Requested', 'Our team will schedule the return shortly.');
+        }}
+      />
     </SafeAreaView>
   );
 };
@@ -448,12 +530,20 @@ const styles = StyleSheet.create({
   secondaryButton: {
     backgroundColor: '#e5e7eb',
   },
+  requestReturnButton: {
+    borderWidth: 1,
+    borderColor: '#dbeafe',
+    backgroundColor: '#f8fbff',
+  },
   actionButtonText: {
     ...FONTS.body2,
     fontWeight: '600',
   },
   secondaryButtonText: {
     color: '#1f2937',
+  },
+  requestReturnText: {
+    color: '#1f7cff',
   },
 });
 
