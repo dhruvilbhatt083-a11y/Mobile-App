@@ -12,10 +12,55 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS, SIZES } from '../constants/theme';
-import { updateBookingStatus } from '../services/bookingsService';
+import { getFirestore, doc, runTransaction, serverTimestamp } from 'firebase/firestore';
+import { useAuth } from '../src/context/AuthContext';
+
+const db = getFirestore();
+
+/**
+ * Atomically mark deposit as paid and move booking to 'in_use'.
+ * bookingId: string, method: 'cash_at_pickup'|'online', userId: id of actor
+ */
+async function markDepositPaidAndStartRental(bookingId, method = 'cash_at_pickup', userId = 'system') {
+  const ref = doc(db, 'bookings', bookingId);
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists()) throw new Error('Booking not found');
+    const data = snap.data();
+
+    // Build new payment object
+    const payment = {
+      ...(data.payment || {}),
+      depositMethod: method,
+      depositPaid: true,
+    };
+
+    // Append statusHistory entry
+    const from = data.status || null;
+    const history = [
+      ...(data.statusHistory || []),
+      {
+        from,
+        to: 'in_use',
+        changedBy: userId,
+        changedAt: serverTimestamp(),
+        note: 'Deposit collected — starting rental',
+      },
+    ];
+
+    tx.update(ref, {
+      payment,
+      status: 'in_use',
+      statusHistory: history,
+      lastStatusChangeAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  });
+}
 
 const DriverPaymentScreen = ({ navigation, route }) => {
   const insets = useSafeAreaInsets();
+  const { user } = useAuth();
 
   const {
     bookingId,
@@ -72,12 +117,8 @@ const DriverPaymentScreen = ({ navigation, route }) => {
     setCashLoading(true);
 
     try {
-      await updateBookingStatus(bookingId, {
-        depositPaid: false,
-        paymentMode: 'cash_at_pickup',
-        paymentStatus: 'deposit_pending',
-        depositAmount,
-      });
+      const currentUserId = user?.id || user?.uid || 'driver_app';
+      await markDepositPaidAndStartRental(bookingId, 'cash_at_pickup', currentUserId);
 
       navigation.replace('BookingConfirmation', {
         bookingId,
