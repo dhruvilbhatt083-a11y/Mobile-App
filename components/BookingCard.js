@@ -2,11 +2,12 @@ import React from 'react';
 import { View, Text, Image, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS } from '../constants/theme';
-import { STATUS_LABELS } from '../constants/bookingStatus';
+import { STATUS_LABELS } from '../src/constants/bookingStatus';
 
 const PLACEHOLDER = 'https://via.placeholder.com/120x90?text=Car';
 
 const BookingCard = ({ booking, onView, onChat, onPay }) => {
+  console.log('DEBUG booking:', booking);
   const {
     carImage,
     carName,
@@ -20,9 +21,27 @@ const BookingCard = ({ booking, onView, onChat, onPay }) => {
     showPay,
   } = booking;
 
-  const displayedStatus =
-    booking?.status || (booking?.bookingStatus && booking.bookingStatus.trim());
-  const statusLabel = STATUS_LABELS[displayedStatus] || displayedStatus || '—';
+  // normalize legacy status strings into canonical keys we support
+  const normalizeStatus = (s) => {
+    if (!s) return null;
+    const t = String(s).trim().toLowerCase();
+
+    // Legacy -> canonical mappings
+    if (t === 'scheduled' || t === 'scheduled ') return 'requested'; // legacy scheduled => requested
+    if (t === 'confirmed' || t === 'active') return 'in_use';
+    if (t === 'return_requested' || t === 'return requested') return 'return_requested';
+    if (t === 'return approved' || t === 'return_approved') return 'ready_for_pickup';
+    if (t === 'completed' || t === 'done') return 'completed';
+    if (t === 'cancelled' || t === 'canceled') return 'cancelled';
+
+    // if already canonical, return lower-case key
+    return t;
+  };
+
+  const rawStatus =
+    booking?.status ?? (booking?.bookingStatus && booking.bookingStatus.trim());
+  const displayedStatus = normalizeStatus(rawStatus) || rawStatus || null;
+  const statusLabel = STATUS_LABELS[displayedStatus] || (displayedStatus ? displayedStatus : '—');
 
   const depositCollected = booking?.depositCollected === true;
   const depositLabel = depositCollected
