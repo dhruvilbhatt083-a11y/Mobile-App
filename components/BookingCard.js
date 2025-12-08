@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, Image, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, FONTS } from '../constants/theme';
+import { STATUS_LABELS } from '../constants/bookingStatus';
 
 const PLACEHOLDER = 'https://via.placeholder.com/120x90?text=Car';
 
@@ -13,16 +14,27 @@ const BookingCard = ({ booking, onView, onChat, onPay }) => {
     durationDays,
     bookingId,
     depositPaid,
-    depositStatus,
     totalEstimatedRent,
-    status,
     balanceDue,
     canChat,
     showPay,
   } = booking;
 
+  const displayedStatus =
+    booking?.status || (booking?.bookingStatus && booking.bookingStatus.trim());
+  const statusLabel = STATUS_LABELS[displayedStatus] || displayedStatus || '—';
+
+  const depositCollected = booking?.depositCollected === true;
+  const depositLabel = depositCollected
+    ? 'Deposit collected'
+    : (booking?.depositStatus
+        ? String(booking.depositStatus).trim()
+        : 'Deposit pending (cash at pickup)');
+
+  const isDepositComplete = depositCollected || depositPaid;
+
   const statusColor = (() => {
-    switch ((status || '').toLowerCase()) {
+    switch ((displayedStatus || '').toLowerCase()) {
       case 'active':
       case 'confirmed':
         return '#16A34A';
@@ -35,8 +47,6 @@ const BookingCard = ({ booking, onView, onChat, onPay }) => {
         return '#EF4444';
     }
   })();
-
-  const depositLabel = depositPaid ? 'Deposit paid' : (depositStatus || 'Deposit pending');
 
   return (
     <View style={styles.card}>
@@ -58,11 +68,11 @@ const BookingCard = ({ booking, onView, onChat, onPay }) => {
 
           <View style={styles.badgeInline}>
             <Ionicons
-              name={depositPaid ? 'checkmark-circle' : 'time'}
+              name={isDepositComplete ? 'checkmark-circle' : 'time'}
               size={14}
-              color={depositPaid ? '#16A34A' : '#F59E0B'}
+              color={isDepositComplete ? '#16A34A' : '#F59E0B'}
             />
-            <Text style={[styles.badgeText, { color: depositPaid ? '#16A34A' : '#F59E0B' }]}>
+            <Text style={[styles.badgeText, { color: isDepositComplete ? '#16A34A' : '#F59E0B' }]}>
               {`  ${depositLabel}`}
             </Text>
           </View>
@@ -72,7 +82,7 @@ const BookingCard = ({ booking, onView, onChat, onPay }) => {
           <Text style={styles.amount}>{totalEstimatedRent ? `₹${Number(totalEstimatedRent).toLocaleString('en-IN')}` : '₹0'}</Text>
           <View style={[styles.statusPill, { borderColor: statusColor, backgroundColor: `${statusColor}20` }]}
           >
-            <Text style={[styles.statusText, { color: statusColor }]}>{(status || 'unknown').toUpperCase()}</Text>
+            <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
           </View>
         </View>
       </View>
